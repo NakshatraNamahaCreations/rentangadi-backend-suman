@@ -228,23 +228,60 @@ class report {
   }
 
   async clientReportByMonth(req, res) {
-    const { clientIds, year, month } = req.body;
-    console.log(`"year: ", ${year}, " month: ", ${month}`, "clientIds:", clientIds);
+    const { clientIds, year, month, startDate, endDate } = req.body;
 
     try {
-      if (!year || !month || isNaN(year) || isNaN(month) || month < 1 || month > 12) {
-        return res.status(400).json({ message: "Invalid year or month" });
+      /**
+       * Three ways to say which period is wanted, in order of precedence:
+       *   startDate + endDate  an explicit range
+       *   year + month         one month
+       *   year                 the whole year
+       *
+       * The month used to be required, so the screen's "Whole year" option
+       * could only ever answer 400.
+       */
+      const asDate = (value) => {
+        if (!value) return null;
+        /* DD-MM-YYYY, which is how dates are written everywhere else here. */
+        const dmy = String(value).match(/^(\d{2})-(\d{2})-(\d{4})$/);
+        const d = dmy
+          ? new Date(Date.UTC(+dmy[3], +dmy[2] - 1, +dmy[1]))
+          : new Date(value);
+        return isNaN(d) ? null : d;
+      };
+
+      let rangeStart = asDate(startDate);
+      let rangeEnd = asDate(endDate);
+      let rangeLabel;
+
+      if (rangeStart && rangeEnd) {
+        /* Inclusive of the end day, so a single-day range returns that day. */
+        rangeEnd = new Date(rangeEnd.getTime() + 24 * 60 * 60 * 1000);
+        rangeLabel = `${startDate} to ${endDate}`;
+      } else if (year && !isNaN(year)) {
+        if (month && !isNaN(month) && month >= 1 && month <= 12) {
+          rangeStart = new Date(Date.UTC(year, month - 1, 1));
+          rangeEnd = new Date(Date.UTC(year, month, 1));
+          rangeLabel = `${year}-${String(month).padStart(2, "0")}`;
+        } else {
+          rangeStart = new Date(Date.UTC(year, 0, 1));
+          rangeEnd = new Date(Date.UTC(Number(year) + 1, 0, 1));
+          rangeLabel = String(year);
+        }
+      } else {
+        return res.status(400).json({
+          message: "Give a year, or a start and end date",
+        });
       }
 
-      // Convert clientIds to ObjectId array
-      const clientIdObjs = clientIds.map(id => new mongoose.Types.ObjectId(id));
-      console.log("clientIdObjs:", clientIdObjs);
+      /* An empty list means every client. It used to be passed straight into
+         an $in, which matches nothing, so "All clients" came back empty. */
+      const clientIdObjs = (clientIds || [])
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
 
-      // Define month boundaries (UTC) to avoid timezone edge cases
-      const monthStart = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-      const nextMonthStart = new Date(Date.UTC(year, month, 1, 0, 0, 0, 0));
-      console.log(`monthStart `, monthStart)
-      console.log(`nextMonthStart `, nextMonthStart)
+      const monthStart = rangeStart;
+      const nextMonthStart = rangeEnd;
 
       // Fetch orders for the specified clients
       // Fetch orders for the specified clients where slot overlaps the month
@@ -253,7 +290,10 @@ class report {
         {
           $match: {
             orderStatus: "Confirm",
-            clientId: { $in: clientIdObjs },
+            /* No ids given means do not narrow by client at all. */
+            ...(clientIdObjs.length
+              ? { clientId: { $in: clientIdObjs } }
+              : {}),
             slots: {
               $elemMatch: {
                 quoteDateObj: {
@@ -293,6 +333,30 @@ class report {
             paymentMode: { $first: "$payments.paymentMode" },
           },
         },
+        /* Only what the report below reads. A year of orders came back whole,
+           slots, products and all, which is about two megabytes off Atlas and
+           the better part of twenty seconds. */
+        {
+          $project: {
+            clientId: 1,
+            executivename: 1,
+            Address: 1,
+            GrandTotal: 1,
+            discount: 1,
+            roundOff: 1,
+            createdAt: 1,
+            totalPaid: 1,
+            payments: 1,
+            "slots.quoteDateObj": 1,
+            "slots.endDateObj": 1,
+            "slots.products.productId": 1,
+            "slots.products.productName": 1,
+            "slots.products.quantity": 1,
+            "slots.products.total": 1,
+            "slots.products.productQuoteDate": 1,
+            "slots.products.productEndDate": 1,
+          },
+        },
         {
           $sort: { createdAt: -1 },
         },
@@ -300,10 +364,22 @@ class report {
 
 
       if (!orders || orders.length === 0) {
-        return res.status(200).json({ message: "No orders found for the specified clients" });
+        /* An empty period is a valid answer, so the shape stays the same and
+           the screen can show zeroes rather than having to special-case a
+           message it never asked for. */
+        return res.status(200).json({
+          month: rangeLabel,
+          range: rangeLabel,
+          message: "No orders found for the specified clients",
+          totalRevenue: 0,
+          totalDiscount: 0,
+          totalRoundOff: 0,
+          totalPayments: 0,
+          orders: [],
+        });
       }
 
-      console.log(`orders list: `, orders.map(o => o.payments));
+
 
       // Create a month-wise report object
       const monthWiseReport = {
@@ -313,12 +389,8 @@ class report {
         totalPayments: 0,
         orders: []
       };
-      console.log(`orders[0]: `, orders[0].slots[0].products.map(product => ({
-        total: product.total,
-        quantity: product.quantity,
-        productQuoteDate: product.productQuoteDate,
-        productEndDate: product.productEndDate
-      })));
+      /* This used to log the first order's products, which threw outright on
+         an order whose slot has none - and that is a normal record here. */
       // console.log(`orders: `, orders[1].slots[0].products.map(product => ({
       //   total: product.total,
       //   quantity: product.quantity,
@@ -340,8 +412,11 @@ class report {
 
         // const allProducts = await Product.find({}).select("ProductPrice").lean();
         // const productPriceMap = new Map(allProducts.map(p => [p._id.toString(), Number(p.ProductPrice)]));
-        const allProductsTotal = slot.products.reduce((total, product) => total + Number(product.total || 0), 0);
-        console.log(`allProductsTotal: `, allProductsTotal);
+        const slotProducts = slot.products || [];
+        const allProductsTotal = slotProducts.reduce(
+          (total, product) => total + Number(product.total || 0),
+          0
+        );
 
         // Calculate total for this order
         const orderTotal = order.GrandTotal || 0;
@@ -379,7 +454,7 @@ class report {
             // status: p.status,
             date: p.createdAt,
           })),
-          products: slot.products.map(product => ({
+          products: slotProducts.map(product => ({
             productId: product.productId,
             productName: product.productName,
             quantity: Number(product.quantity || 0),
@@ -392,10 +467,13 @@ class report {
       // Sort orders by date
       monthWiseReport.orders.sort((a, b) => b.orderDate - a.orderDate);
 
-      console.log(`monthWiseReport: `, monthWiseReport);
+
 
       return res.status(200).json({
-        month: `${year}-${month}`,
+        /* `month` is kept for callers that already read it; `range` says what
+           was actually covered, which may be a year or a date range. */
+        month: rangeLabel,
+        range: rangeLabel,
         ...monthWiseReport
       });
     } catch (error) {

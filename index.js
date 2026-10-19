@@ -9,15 +9,39 @@ const cookieParser = require("cookie-parser");
 const path = require("path");
 
 
-mongoose
+/**
+ * Database connection.
+ *
+ * The promise is kept so requests can wait on it instead of firing queries
+ * at a connection that is not up yet. Without that, Mongoose buffers each
+ * query for ten seconds and then fails with a generic timeout, which hides
+ * the real reason - and on a 10s serverless platform that reads as a 500 on
+ * every single call.
+ */
+let dbError = null;
+
+const dbReady = mongoose
   .connect(process.env.MONGO_URI, {
-    // useNewUrlParser: true,
-    // useUnifiedTopology: true,
+    /* Fail in well under the 10s serverless limit, so the real error is
+       returned instead of being cut off by the platform. */
+    serverSelectionTimeoutMS: 7000,
   })
-  .then(() =>
-    console.log("=============MongoDb Database connected successfuly")
-  )
-  .catch((err) => console.log("Database Not connected !!!", err));
+  .then(() => {
+    console.log("=============MongoDb Database connected successfuly");
+    dbError = null;
+  })
+  .catch((err) => {
+    dbError = err;
+    console.log("Database Not connected !!!", err);
+  });
+
+/* A missing or wrong MONGO_URI looks exactly like a network problem from the
+   outside, so it is named explicitly at boot. */
+if (!process.env.MONGO_URI) {
+  console.log(
+    "Database Not connected !!! MONGO_URI is not set in this environment"
+  );
+}
 
 //middleware
 app.use(compression());
@@ -47,6 +71,50 @@ const report = require('./route/report')
 const user = require("./route/user");
 const clientAuth = require("./route/Auth/clientAuth.js");
 const executive = require("./route/executive");
+
+/**
+ * Nothing under /api can work without the database, so every request waits
+ * for the connection and gets a straight answer if it failed. This replaces
+ * ten seconds of buffering followed by "Internal server error".
+ */
+app.use("/api", async (req, res, next) => {
+  try {
+    await dbReady;
+  } catch (err) {
+    dbError = err;
+  }
+
+  if (mongoose.connection.readyState === 1) return next();
+
+  return res.status(503).json({
+    error: "Database unavailable",
+    reason: dbError
+      ? dbError.message
+      : !process.env.MONGO_URI
+        ? "MONGO_URI is not set in this environment"
+        : "Still connecting",
+  });
+});
+
+/**
+ * Says whether this deployment can reach the database, without exposing the
+ * connection string. One request answers what would otherwise mean reading
+ * the platform logs.
+ */
+app.get("/api/health", (req, res) => {
+  const states = ["disconnected", "connected", "connecting", "disconnecting"];
+  const uri = process.env.MONGO_URI || "";
+  res.json({
+    ok: mongoose.connection.readyState === 1,
+    database: states[mongoose.connection.readyState] || mongoose.connection.readyState,
+    mongoUriPresent: Boolean(uri),
+    mongoUriLength: uri.length,
+    /* Host only - never the user, password or options. */
+    mongoHost: (uri.match(/@([^/?]+)/) || [])[1] || null,
+    lastError: dbError ? dbError.message : null,
+    node: process.version,
+  });
+});
 
 app.use("/api", payu);
 app.use("/api", adminLogin);
