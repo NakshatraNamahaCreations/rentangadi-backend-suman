@@ -6,6 +6,22 @@ const moment = require("moment");
 const { default: mongoose } = require("mongoose");
 const { cloudinary } = require("../config/cloudinary");
 
+/**
+ * Units on the shelf.
+ *
+ * ProductStock is derived, never decremented: it is the total less whatever
+ * is away for repair or written off. Recomputing it means a repaired unit
+ * coming back - repairCount going down - puts the stock back by itself.
+ *
+ * Only finite numbers are taken from the request. Number(undefined) is NaN,
+ * and NaN ?? 0 is still NaN, which is how ProductStock could be set to
+ * something unusable by a form that simply did not carry the field.
+ */
+const stockFrom = (total, repair, lost) => {
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  return Math.max(0, num(total) - num(repair) - num(lost));
+};
+
 const generateSKU = () => {
   const chars = "0123456789";
   let sku = "SKU";
@@ -211,7 +227,7 @@ class ProductManagement {
         ProductSize,
         Color,
         seater, file, "etst")
-      const newProductStock = qty - (repairCount ?? 0);
+      const newProductStock = stockFrom(qty, repairCount, 0);
       // const product = await ProductManagementModel.findOne()
       //   .sort({ ProductSKU: -1 })
       //   .exec();
@@ -254,8 +270,11 @@ class ProductManagement {
         ProductGst,
         Productdetails,
         ProductStock: newProductStock,
-        repairCount,
-        StockAvailable: ProductStock,
+        /* A new product has nothing away for repair or written off unless the
+           form says so, and StockAvailable starts level with the stock. */
+        repairCount: Number(repairCount) || 0,
+        lostCount: 0,
+        StockAvailable: newProductStock,
         qty,
         Material,
         ProductSize,
@@ -364,6 +383,7 @@ class ProductManagement {
       maxGty,
       ProductStock,
       repairCount,
+      lostCount,
       activeStatus,
       Material,
       ProductSize,
@@ -439,11 +459,25 @@ class ProductManagement {
         updated.normalizedProductName = normalizedProductName;
       }
 
-      // basic idea: total is alaways "productstock + repair"
-      let newProductStock
-      let newRepairCount = Number(repairCount) ?? 0;
+      /* Total less repair less lost. The edit form carries repairCount but
+         not lostCount, so anything written off was being handed back as
+         stock the moment the product was edited; the stored count stands
+         unless the request actually sends one. */
+      const keep = (sent, stored) => {
+        /* An empty field is the form not carrying a value, not a zero.
+           Number("") is 0, which would quietly hand damaged units back. */
+        const given = typeof sent === "string" ? sent.trim() : sent;
+        if (given === "" || given === null || given === undefined) {
+          return Number(stored) || 0;
+        }
+        return Number.isFinite(Number(given)) ? Number(given) : Number(stored) || 0;
+      };
 
-      newProductStock = qty - newRepairCount;
+      const newRepairCount = keep(repairCount, findProduct.repairCount);
+      const newLostCount = keep(lostCount, findProduct.lostCount);
+      const newQty = keep(qty, findProduct.qty);
+
+      const newProductStock = stockFrom(newQty, newRepairCount, newLostCount);
 
 
       // ✅ Handle single image update
@@ -456,9 +490,10 @@ class ProductManagement {
         ProductFeature: ProductFeature ?? findProduct.ProductFeature,
         ProductPrice: ProductPrice ?? findProduct.ProductPrice,
         // offerPrice: offerPrice ?? findProduct.offerPrice,
-        qty: qty ?? findProduct.qty,
+        qty: newQty,
         ProductStock: newProductStock,
-        repairCount,
+        repairCount: newRepairCount,
+        lostCount: newLostCount,
         ProductDesc: ProductDesc ?? findProduct.ProductDesc,
         Material: Material ?? findProduct.Material,
         ProductSize: ProductSize ?? findProduct.ProductSize,
@@ -622,13 +657,22 @@ class ProductManagement {
 
       // updatedProduct.ProductStock = Number(updatedProduct.qty) - (Number(updatedProduct.repairCount) + Number(updatedProduct.lostCount));
 
-      const totalDamaged = Number(updatedProduct.repairCount) + Number(updatedProduct.lostCount);
-      const updatedStock = Number(updatedProduct.qty) - totalDamaged;
+      const updatedStock = stockFrom(
+        updatedProduct.qty,
+        updatedProduct.repairCount,
+        updatedProduct.lostCount
+      );
+      const totalDamaged =
+        (Number(updatedProduct.repairCount) || 0) +
+        (Number(updatedProduct.lostCount) || 0);
 
-      if (updatedStock < 0) {
+      /* Checked against the total rather than the clamped stock, which can
+         never go below zero and so could never trip this. */
+      if (totalDamaged > (Number(updatedProduct.qty) || 0)) {
         await session.abortTransaction();
+        session.endSession();
         return res.status(400).json({
-          error: "Damaged + Lost quantity must be less than Total Qty"
+          error: "Damaged + Lost quantity must not exceed Total Qty",
         });
       }
 
