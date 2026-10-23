@@ -1223,8 +1223,7 @@ class order {
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
       const full = String(req.query.full || "") === "1";
       const LIST_FIELDS =
-        /* quoteId links an order back to its quotation. */
-        "orderId quoteId clientName clientNo executivename GrandTotal createdAt " +
+        "orderId clientName clientNo executivename GrandTotal createdAt " +
         "Address orderStatus slots.slotName slots.quoteDate slots.endDate " +
         "slots.quoteTime";
 

@@ -785,8 +785,7 @@ class Quotations {
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
       const full = String(req.query.full || "") === "1";
       const LIST_FIELDS =
-        /* enquiryId links a quotation back to the enquiry it came from. */
-        "quoteId enquiryId clientName clientNo quoteDate quoteTime endDate " +
+        "quoteId clientName clientNo quoteDate quoteTime endDate " +
         "executivename GrandTotal GST status createdAt discount " +
         "inchargeName labourecharge transportcharge";
 
