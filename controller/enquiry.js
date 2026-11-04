@@ -11,6 +11,68 @@ const OrderModel = require("../model/order"); // ✅ update if your model file n
 const moment = require("moment");
 const Order = require("../model/order"); // ✅ adjust path to your Order model
 
+/**
+ * How far each of these enquiries got, as one word per enquiry.
+ *
+ * An enquiry's own `status` only says whether a quotation exists, so a job
+ * that was confirmed and one that was called off both read as "sent". The
+ * answer lives one and two documents further on - the quotation raised from
+ * the enquiry, and the order raised from that quotation - so both are read
+ * here and folded into a single stage.
+ *
+ * Returns a Map of enquiryId (as a string) -> "pending" | "sent" |
+ * "confirmed" | "cancelled". An enquiry with no quotation is absent from the
+ * map, which the caller reads as "pending".
+ */
+async function pipelineStageByEnquiry(enquiryIds) {
+  const stages = new Map();
+  if (!enquiryIds.length) return stages;
+
+  const quotations = await Quotationmodel.find({
+    enquiryId: { $in: enquiryIds },
+  })
+    .select("quoteId enquiryId status")
+    .lean();
+
+  if (!quotations.length) return stages;
+
+  const orders = await Order.find({
+    quoteId: { $in: quotations.map((q) => q.quoteId).filter(Boolean) },
+  })
+    .select("quoteId orderStatus")
+    .lean();
+
+  /* A quote re-confirmed after being called off reads as confirmed, so a
+     confirmed order is never overwritten by a cancelled one. */
+  const orderByQuote = new Map();
+  orders.forEach((o) => {
+    const key = String(o.quoteId || "");
+    if (!key || orderByQuote.get(key) === "confirm") return;
+    orderByQuote.set(key, String(o.orderStatus || "").toLowerCase());
+  });
+
+  quotations.forEach((q) => {
+    const key = String(q.enquiryId ?? "");
+    if (!key) return;
+
+    const orderState = orderByQuote.get(String(q.quoteId || ""));
+    let stage = "sent";
+    if (orderState === "confirm") stage = "confirmed";
+    else if (orderState === "cancelled") stage = "cancelled";
+    else if (String(q.status || "").toLowerCase() === "cancelled") {
+      /* The quotation itself was withdrawn, before any order came of it. */
+      stage = "cancelled";
+    }
+
+    /* One enquiry can carry several quotations; the furthest one wins. */
+    const RANK = { sent: 1, cancelled: 2, confirmed: 3 };
+    const held = stages.get(key);
+    if (!held || RANK[stage] > RANK[held]) stages.set(key, stage);
+  });
+
+  return stages;
+}
+
 
 
 class Enquiry {
@@ -262,7 +324,19 @@ class Enquiry {
       console.log("getMyEnquiries enquiryData: ", enquiryData.map(item => item.enquiryId));
 
       if (enquiryData) {
-        return res.status(200).json({ enquiryData: enquiryData });
+        /* The client's own screens show how far each enquiry got, which the
+           enquiry document alone cannot say. Two indexed reads, scoped to
+           the enquiries just fetched. */
+        const stages = await pipelineStageByEnquiry(
+          enquiryData.map((e) => e.enquiryId).filter((x) => x != null)
+        );
+
+        const withStage = enquiryData.map((e) => ({
+          ...e,
+          pipelineStatus: stages.get(String(e.enquiryId ?? "")) || "pending",
+        }));
+
+        return res.status(200).json({ enquiryData: withStage });
       }
 
       res.json(enquiryData)
@@ -383,24 +457,39 @@ class Enquiry {
       // ✅ only return orderSlots
       let orderSlots = [];
       let hasConfirmedOrder = false;
+      /* The order's own state, so the screen can tell a quote that was
+         cancelled from one still waiting for an answer. */
+      let orderStatus = null;
 
-      if (String(enquiryData.status) === "sent") {
-        quotationData = await Quotationmodel.findOne({
-          enquiryId: enquiryData.enquiryId,
-        }).lean();
+      /* The quotation this enquiry raised, if there is one. The enquiry's
+         own `status` is not consulted: it stays "sent" after a quotation is
+         deleted, so it over-claims. */
+      quotationData = await Quotationmodel.findOne({
+        enquiryId: enquiryData.enquiryId,
+      }).lean();
 
-        if (quotationData?.quoteId) {
-          const orderDoc = await Order.findOne({
-            quoteId: quotationData.quoteId,
-            orderStatus: { $in: ["Confirm", "Approved", "Completed"] },
-          })
-            .select("slots")
-            .lean();
+      if (quotationData?.quoteId) {
+        /* Every order on this quote, newest first. A confirmed one wins over
+           a cancelled one, so a quote re-confirmed after being called off
+           reads as confirmed. */
+        const orderDocs = await Order.find({
+          quoteId: quotationData.quoteId,
+        })
+          .select("slots orderStatus")
+          .sort({ _id: -1 })
+          .lean();
 
-          if (orderDoc?.slots?.length) {
-            orderSlots = orderDoc.slots;
-            hasConfirmedOrder = true;
-          }
+        const DONE = ["confirm", "approved", "completed"];
+        const confirmed = orderDocs.find((o) =>
+          DONE.includes(String(o.orderStatus || "").toLowerCase())
+        );
+
+        if (confirmed) {
+          orderSlots = confirmed.slots || [];
+          hasConfirmedOrder = true;
+          orderStatus = confirmed.orderStatus;
+        } else if (orderDocs.length) {
+          orderStatus = orderDocs[0].orderStatus;
         }
       }
 
@@ -413,6 +502,7 @@ class Enquiry {
 
         quotationData,
         orderSlots,
+        orderStatus,
         hasConfirmedOrder,
       };
 
