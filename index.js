@@ -20,20 +20,46 @@ const path = require("path");
  */
 let dbError = null;
 
-const dbReady = mongoose
-  .connect(process.env.MONGO_URI, {
+/**
+ * Mongoose only reconnects by itself once a first connection has been made.
+ * If this one fails - a slow DNS answer or a moment with no primary is
+ * enough - it never tries again, and the process then answers every request
+ * with "Database unavailable" until someone notices and restarts it. So the
+ * first connection is retried, backing off to half a minute.
+ */
+const connect = () =>
+  mongoose.connect(process.env.MONGO_URI, {
     /* Fail in well under the 10s serverless limit, so the real error is
        returned instead of being cut off by the platform. */
     serverSelectionTimeoutMS: 7000,
-  })
-  .then(() => {
-    console.log("=============MongoDb Database connected successfuly");
-    dbError = null;
-  })
-  .catch((err) => {
-    dbError = err;
-    console.log("Database Not connected !!!", err);
   });
+
+const connectWithRetry = async (attempt = 1) => {
+  try {
+    /* A failed attempt leaves a topology still retrying underneath, and a
+       second connect() on top of that one never settles - so it is dropped
+       before trying again. */
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect().catch(() => {});
+    }
+    await connect();
+    dbError = null;
+    console.log("=============MongoDb Database connected successfuly");
+  } catch (err) {
+    dbError = err;
+    const wait = Math.min(30000, attempt * 3000);
+    console.log(
+      `Database Not connected !!! retrying in ${wait / 1000}s`,
+      err.message
+    );
+    setTimeout(() => connectWithRetry(attempt + 1), wait).unref?.();
+  }
+};
+
+/* Settles when the first attempt has been made, not when it succeeded: a
+   request arriving during an outage gets the 503 below rather than hanging
+   on a connection that may be minutes away. */
+const dbReady = connectWithRetry();
 
 /* A missing or wrong MONGO_URI looks exactly like a network problem from the
    outside, so it is named explicitly at boot. */

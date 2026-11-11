@@ -666,7 +666,20 @@ class order {
       // Update the product's quantity and total
       orderProduct.quantity = quantity;
       const rentalDays = moment(productEndDate, "DD-MM-YYYY").diff(moment(productQuoteDate, "DD-MM-YYYY"), "days") + 1;
-      orderProduct.total = Number(quantity) * Number(findProd.ProductPrice) * rentalDays;
+
+      /* A price sent with the edit is this order's own, agreed with this
+         client; the product in the catalogue keeps its list price and is
+         not touched. Without one the line keeps what it already charged. */
+      if (productPrice !== undefined && productPrice !== null && productPrice !== "") {
+        orderProduct.productPrice = Number(productPrice);
+      }
+
+      /* Every other line below is totalled from its own productPrice, so
+         this one is too - reading the catalogue here made an edited line
+         disagree with the lines beside it. */
+      const linePrice =
+        Number(orderProduct.productPrice) || Number(findProd.ProductPrice) || 0;
+      orderProduct.total = Number(quantity) * linePrice * rentalDays;
 
       if (availableStock >= quantityDifference) {
         inventory.reservedQty += quantityDifference;
