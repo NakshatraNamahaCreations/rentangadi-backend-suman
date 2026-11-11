@@ -981,11 +981,13 @@ class Quotations {
               return {
                 productId: product.productId,
                 productName: product.productName || product.name || productDetails?.ProductName || "Unnamed Product",
-                // If the master product was deleted, productDetails is null.
-                // Fall back to the price stored on the quotation itself
-                // rather than crashing the whole response and hiding the
-                // entire quotation behind "Quotation not found".
-                price: productDetails?.ProductPrice ?? product.price ?? 0,
+                /* The price this quotation agreed, which is the one that
+                   was billed and the one its totals are built from. The
+                   catalogue's current price is only a fallback for a line
+                   that never stored one - substituting it here made an
+                   edited price vanish on the next reload, while the line's
+                   own total still showed the agreed figure. */
+                price: product.price ?? productDetails?.ProductPrice ?? 0,
                 quantity: product.quantity || product.qty,
                 total: product.total,
                 ProductIcon: productDetails?.ProductIcon || null,
