@@ -142,7 +142,15 @@ class order {
             product.productName = findProd?.ProductName || product.name || product.productName;
           }
 
-          product.productPrice = findProd.ProductPrice;
+          /* The price the quotation agreed, which is what the client was
+             quoted and may differ from today's list price. The catalogue
+             is the fallback for a line that arrives without one; a price
+             of zero is honoured, since a line can be given away. */
+          const quotedPrice = product.productPrice ?? product.price;
+          product.productPrice =
+            quotedPrice === undefined || quotedPrice === null || quotedPrice === ""
+              ? Number(findProd.ProductPrice) || 0
+              : Number(quotedPrice) || 0;
 
           const rentalDays = moment(productEndDate, "DD-MM-YYYY").diff(moment(productQuoteDate, "DD-MM-YYYY"), "days") + 1;
           const total = Number(quantity) * Number(product.productPrice) * rentalDays;
