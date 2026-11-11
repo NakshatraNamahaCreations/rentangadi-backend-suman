@@ -7,6 +7,9 @@ const listCache = require("../utils/listCache");
    cached list is dropped. Hooking the router rather than each handler
    means new routes are covered without touching this again. */
 router.use(listCache.invalidateOn(listCache.KEYS.quotations));
+/* Creating a quotation marks its enquiry as sent, so that list is stale
+   after a write here as well. */
+router.use(listCache.invalidateOn(listCache.KEYS.enquiries));
 /* Reserving or releasing stock changes every product's StockAvailable. */
 router.use(listCache.invalidateOn(listCache.KEYS.products));
 const QuotationsController = require("../controller/quotations");

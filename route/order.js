@@ -7,6 +7,11 @@ const listCache = require("../utils/listCache");
    cached list is dropped. Hooking the router rather than each handler
    means new routes are covered without touching this again. */
 router.use(listCache.invalidateOn(listCache.KEYS.orders));
+/* Raising an order marks its quotation as sent, and cancelling one leaves
+   that quotation reading differently too - so the quotation list is as
+   stale as the order list after a write here. Without this the quotation
+   list kept saying Pending for up to two minutes after Generate Order. */
+router.use(listCache.invalidateOn(listCache.KEYS.quotations));
 /* Reserving or releasing stock changes every product's StockAvailable. */
 router.use(listCache.invalidateOn(listCache.KEYS.products));
 const orderController = require("../controller/order");
