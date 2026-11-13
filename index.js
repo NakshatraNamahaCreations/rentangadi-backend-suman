@@ -170,37 +170,28 @@ const Enquirymodel = require("./model/enquiry");
 const ordermodel = require("./model/order");
 const Quotationmodel = require("./model/quotations");
 
+/* The same fields the handlers send, from the same place. Written out
+   again here, these drifted: the refresh dropped the keys that link a
+   quotation to its enquiry and an order to its quotation, so two minutes
+   after boot every list quietly lost them again. */
+const listFields = require("./utils/listFields");
+
 listCache.register(listCache.KEYS.enquiries, () =>
   Enquirymodel.find({})
     .populate("executiveId", "name")
     .sort({ _id: -1 })
-    .select(
-      "enquiryId clientName clientNo enquiryDate enquiryTime executivename " +
-        "executiveId GrandTotal status createdAt"
-    )
+    .select(listFields.ENQUIRIES)
     .lean()
 );
 
 listCache.register(listCache.KEYS.orders, () =>
-  ordermodel
-    .find({})
-    .sort({ _id: -1 })
-    .select(
-      "orderId clientName clientNo executivename GrandTotal createdAt " +
-        "Address orderStatus slots.slotName slots.quoteDate slots.endDate " +
-        "slots.quoteTime"
-    )
-    .lean()
+  ordermodel.find({}).sort({ _id: -1 }).select(listFields.ORDERS).lean()
 );
 
 listCache.register(listCache.KEYS.quotations, () =>
   Quotationmodel.find({})
     .sort({ _id: -1 })
-    .select(
-      "quoteId clientName clientNo quoteDate quoteTime endDate " +
-        "executivename GrandTotal GST status createdAt discount " +
-        "inchargeName labourecharge transportcharge"
-    )
+    .select(listFields.QUOTATIONS)
     .lean()
 );
 

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Enquirymodel = require("../model/enquiry");
 const listCache = require("../utils/listCache");
+const listFields = require("../utils/listFields");
 const Counter = require("../model/getNextSequence");
 const Inventory = require("../model/inventory");
 const Clientmodel = require("../model/clients");
@@ -287,9 +288,7 @@ class Enquiry {
       const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
       const full = String(req.query.full || "") === "1";
-      const LIST_FIELDS =
-        "enquiryId clientName clientNo enquiryDate enquiryTime executivename " +
-        "executiveId GrandTotal status createdAt";
+      const LIST_FIELDS = listFields.ENQUIRIES;
 
       /* Only the plain call is cached; paginated ones are already fast. */
       const isDefaultCall = !limit && !full;

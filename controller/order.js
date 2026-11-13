@@ -1,5 +1,6 @@
 const ordermodel = require("../model/order");
 const listCache = require("../utils/listCache");
+const listFields = require("../utils/listFields");
 const ProductManagementModel = require("../model/product");
 const InventoryModel = require("../model/inventory");
 const mongoose = require("mongoose");
@@ -1243,11 +1244,7 @@ class order {
       const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
       const full = String(req.query.full || "") === "1";
-      const LIST_FIELDS =
-        /* quoteId links an order back to its quotation. */
-        "orderId quoteId clientName clientNo executivename GrandTotal createdAt " +
-        "Address orderStatus slots.slotName slots.quoteDate slots.endDate " +
-        "slots.quoteTime";
+      const LIST_FIELDS = listFields.ORDERS;
 
       /* Only the plain call is cached; paginated ones are already fast. */
       const isDefaultCall = !limit && !full;

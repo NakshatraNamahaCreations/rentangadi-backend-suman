@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Quotationmodel = require("../model/quotations");
 const listCache = require("../utils/listCache");
+const listFields = require("../utils/listFields");
 const NodeCache = require("node-cache");
 const ProductModel = require("../model/product");
 const InventoryModel = require("../model/inventory");
@@ -784,11 +785,7 @@ class Quotations {
       const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
       const page = Math.max(1, parseInt(req.query.page, 10) || 1);
       const full = String(req.query.full || "") === "1";
-      const LIST_FIELDS =
-        /* enquiryId links a quotation back to the enquiry it came from. */
-        "quoteId enquiryId clientName clientNo quoteDate quoteTime endDate " +
-        "executivename GrandTotal GST status createdAt discount " +
-        "inchargeName labourecharge transportcharge";
+      const LIST_FIELDS = listFields.QUOTATIONS;
 
       /* Only the plain call is cached; paginated ones are already fast. */
       const isDefaultCall = !limit && !full;
