@@ -40,7 +40,7 @@ const connectWithRetry = async (attempt = 1) => {
        second connect() on top of that one never settles - so it is dropped
        before trying again. */
     if (mongoose.connection.readyState !== 0) {
-      await mongoose.disconnect().catch(() => {});
+      await mongoose.disconnect().catch(() => { });
     }
     await connect();
     dbError = null;
@@ -94,6 +94,7 @@ const ALLOWED_ORIGINS = (
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5174",
+    'https://rentangadiadmin.netlify.app',
   ].join(",")
 )
   .split(",")
