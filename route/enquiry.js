@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 
 const listCache = require("../utils/listCache");
+/* Deleting a whole record asks for the admin password first. */
+const confirmPassword = require("../middleware/confirmPassword");
 
 /* Any non-GET on this router may have changed the collection, so the
    cached list is dropped. Hooking the router rather than each handler
@@ -21,7 +23,7 @@ router.get("/related", EnquiryController.getRelatedEnquiriesByQuotationId); // b
 router.post("/updatefollowup/:id", EnquiryController.updateenquiryfollowup);
 router.get("/my-enquiries/:id", EnquiryController.getMyEnquiries);
 router.put("/update-enquiry/:id", EnquiryController.updateEnquiry); // by sonali
-router.delete("/deleteEnquiry/:id", EnquiryController.postdeleteEnquiry);
+router.delete("/deleteEnquiry/:id", confirmPassword, EnquiryController.postdeleteEnquiry);
 router.get("/getEnquiryaggbyid/:id", EnquiryController.getEnquiryaggredata);
 router.post("/add-products", EnquiryController.addProductsToEnquiry);
 router.put('/updateenquiries/:id', EnquiryController.updateEnquiries);

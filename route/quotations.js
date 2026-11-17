@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 
 const listCache = require("../utils/listCache");
+/* Deleting a whole record asks for the admin password first. */
+const confirmPassword = require("../middleware/confirmPassword");
 
 /* Any non-GET on this router may have changed the collection, so the
    cached list is dropped. Hooking the router rather than each handler
@@ -23,7 +25,7 @@ router.get("/getallquotations", QuotationsController.allquotations);
 router.get("/my-quotations/:userId", QuotationsController.getMyQuotations);
 router.get("/getquotation/:quotationId", QuotationsController.getQuotationById);
 router.post("/updatefollowup/:id", QuotationsController.updatequotefollowup);
-router.delete("/deletequotation/:id", QuotationsController.postdeletequotation);
+router.delete("/deletequotation/:id", confirmPassword, QuotationsController.postdeletequotation);
 router.get(
   "/getquotationaggbyid/:id",
   QuotationsController.getquotationaggredata

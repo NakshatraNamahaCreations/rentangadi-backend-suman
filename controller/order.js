@@ -1,6 +1,7 @@
 const ordermodel = require("../model/order");
 const listCache = require("../utils/listCache");
 const listFields = require("../utils/listFields");
+const { readPaging, tellPaging } = require("../utils/listPage");
 const ProductManagementModel = require("../model/product");
 const InventoryModel = require("../model/inventory");
 const mongoose = require("mongoose");
@@ -11,6 +12,11 @@ const Counter = require("../model/getNextSequence");
 const payment = require("../model/payment");
 const moment = require("moment");
 const calculateOrderTotal = require("../utils/orderCalculation");
+const {
+  propagateProduct,
+  updateProductEverywhere,
+  removeProductEverywhere,
+} = require("../utils/propagateProduct");
 
 class order {
   async invoiceId(req, res) {
@@ -581,7 +587,11 @@ class order {
   async updateExistingOrderById(req, res) {
     console.log("inside updateOrderById")
     const { id } = req.params
-    const { productId, quantity, quoteDate, endDate, productQuoteDate, productEndDate, productSlot } = req.body;
+    /* productPrice was read further down but never taken out of the body, so
+       every call threw ReferenceError before it reached the save - which the
+       catch at the end reported as "Failed to update order and inventory".
+       Editing a quantity could not work at all. */
+    const { productId, quantity, productPrice, quoteDate, endDate, productQuoteDate, productEndDate, productSlot } = req.body;
     // console.log({ productId, quantity, quoteDate, endDate, productQuoteDate, productEndDate, productSlot })
     // console.log(`typesof: `, typeof (quantity))
 
@@ -751,12 +761,38 @@ class order {
 
       console.log({ subtotal, totalBeforeCharges, discountAmt, totalAfterCharges, gstAmt, grandTotal, labourecharge, transportcharge, discount, GST })
 
+      /* The same change onto the quotation this order came from and the
+         enquiry behind it. Adding and removing were already carried across;
+         editing a quantity or a price was not, so the three screens ended up
+         describing different jobs. */
+      const propagated = await updateProductEverywhere({
+        session,
+        quoteId: order.quoteId,
+        productId,
+        qty: Number(quantity),
+        /* What the edit set, falling back to the catalogue only when the
+           caller sent no price - the line keeps what it agreed. */
+        price:
+          productPrice !== undefined && productPrice !== null && productPrice !== ""
+            ? Number(productPrice)
+            : Number(findProd.ProductPrice),
+        quoteDate: productQuoteDate || quoteDate,
+        endDate: productEndDate || endDate,
+      });
 
       await session.commitTransaction();
       session.endSession();
 
+      /* All three lists are built from these collections. */
+      listCache.invalidate(
+        listCache.KEYS.orders,
+        listCache.KEYS.quotations,
+        listCache.KEYS.enquiries
+      );
+
       res.status(200).json({
-        message: "Order updated and inventory updated successfully."
+        message: "Order updated and inventory updated successfully.",
+        propagated,
       });
 
     } catch (error) {
@@ -825,8 +861,10 @@ class order {
         0
       );
 
+      /* ProductIcon comes along so the line carries a picture onto the
+         quotation and the enquiry, which both show one. */
       const findProd = await ProductManagementModel.findById(productId)
-        .select('ProductStock ProductPrice')
+        .select('ProductStock ProductPrice ProductIcon')
         .lean()
         .session(session);
 
@@ -932,12 +970,43 @@ class order {
 
       console.log({ subtotal, totalBeforeCharges, discountAmt, totalAfterCharges, gstAmt, grandTotal, labourecharge, transportcharge, discount, GST, additionalTransportation })
 
+      /* The same line onto the quotation this order came from and the
+         enquiry behind that, so the job reads the same from any screen.
+         Inside the transaction: if either of those writes fails, the order
+         does not keep a product the other two never got. */
+      const propagated = await propagateProduct({
+        session,
+        quoteId: order.quoteId,
+        product: {
+          productId,
+          productName,
+          qty: Number(quantity),
+          price: Number(findProd.ProductPrice),
+          total,
+          productImage: findProd.ProductIcon || "",
+          stock: findProd.ProductStock,
+        },
+        quoteDate: productQuoteDate || quoteDate,
+        endDate: productEndDate || endDate,
+        productSlot,
+      });
 
       await session.commitTransaction();
       session.endSession();
 
+      /* The lists are built from these collections, so they are stale the
+         moment the quotation or the enquiry changes. */
+      listCache.invalidate(
+        listCache.KEYS.orders,
+        listCache.KEYS.quotations,
+        listCache.KEYS.enquiries
+      );
+
       res.status(200).json({
-        message: "Order updated and inventory updated successfully."
+        message: "Order updated and inventory updated successfully.",
+        /* What the line actually reached, so the screen can say so instead
+           of claiming three updates it cannot know happened. */
+        propagated,
       });
 
     } catch (error) {
@@ -1241,8 +1310,9 @@ class order {
      ?limit / ?page paginate. */
   async getallorders(req, res) {
     try {
-      const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
-      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      /* limit is capped - see utils/listPage.js - so ?limit=100000 can no
+         longer ask the database for everything it has. */
+      const { limit, page } = readPaging(req);
       const full = String(req.query.full || "") === "1";
       const LIST_FIELDS = listFields.ORDERS;
 
@@ -1250,7 +1320,10 @@ class order {
       const isDefaultCall = !limit && !full;
       if (isDefaultCall) {
         const hit = listCache.get(listCache.KEYS.orders);
-        if (hit) return res.json({ orderData: hit });
+        if (hit) {
+          tellPaging(res, { total: hit.length, page: 1, limit: 0 });
+          return res.json({ orderData: hit });
+        }
       }
 
       const q = ordermodel.find({}).sort({ _id: -1 });
@@ -1259,11 +1332,15 @@ class order {
       const data = await q.lean();
       if (isDefaultCall) listCache.set(listCache.KEYS.orders, data);
 
-      if (data) {
-        return res.json({ orderData: data });
-      } else {
-        return res.status(404).json({ error: "No orders found" });
-      }
+      /* With a limit the page cannot say how many there are, so it is
+         counted - an indexed count, not a second read of the rows. */
+      const total = limit > 0 ? await ordermodel.estimatedDocumentCount() : data.length;
+      tellPaging(res, { total, page, limit });
+
+      /* find() resolves to an array, never null, so the 404 below could
+         never be reached - an empty collection is an empty list, not a
+         missing one. */
+      return res.json({ orderData: data });
     } catch (error) {
       return res.status(500).json({ error: "Failed to retrieve orders" });
     }
@@ -1535,11 +1612,33 @@ class order {
       // Save the updated order
       await order.save({ session });
 
+      /* Off the quotation this order came from and the enquiry behind that,
+         so the three screens do not end up listing different products.
+         Inside the transaction: if either write fails, the order does not
+         lose a product the other two keep. */
+      const propagated = await removeProductEverywhere({
+        session,
+        quoteId: order.quoteId,
+        productId,
+        quoteDate,
+        endDate,
+      });
+
       // Commit the transaction
       await session.commitTransaction();
       session.endSession();
 
-      res.status(200).json({ message: "Product deleted from order and inventory updated successfully" });
+      /* All three lists are built from these collections. */
+      listCache.invalidate(
+        listCache.KEYS.orders,
+        listCache.KEYS.quotations,
+        listCache.KEYS.enquiries
+      );
+
+      res.status(200).json({
+        message: "Product deleted from order and inventory updated successfully",
+        propagated,
+      });
 
     } catch (error) {
       // Abort the transaction if there's an error
@@ -1547,6 +1646,87 @@ class order {
       session.endSession();
       console.error("Error deleting product:", error);
       res.status(500).json({ message: "Failed to delete product from order and update inventory", error: error.message });
+    }
+  }
+
+  /**
+   * Deletes an order outright.
+   *
+   * There was no such endpoint - an order could only be cancelled, which
+   * leaves it in the list - so this is new. The password gate on the route
+   * is what stands between a stray click and a lost record; see
+   * middleware/confirmPassword.js.
+   *
+   * The stock the order was holding is released first. Without that the
+   * reservation outlives the order it belonged to and the product stays
+   * unavailable for those dates with nothing on screen to explain why.
+   *
+   * The quotation and the enquiry behind it are deliberately left alone. An
+   * order is one outcome of an enquiry, not the record of it, and deleting
+   * the history of what a client asked for because one order was removed
+   * would be a much bigger thing than what was asked for here.
+   */
+  async deleteOrderById(req, res) {
+    const { id } = req.params;
+
+    const session = await mongoose.startSession();
+
+    try {
+      session.startTransaction();
+
+      const order = await Order.findById(id).session(session);
+
+      if (!order) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      /* Give the stock back, slot by slot. A missing inventory row is not an
+         error: nothing was reserved, so there is nothing to return. */
+      let released = 0;
+
+      for (const slot of order.slots || []) {
+        for (const product of slot.products || []) {
+          const inventory = await InventoryModel.findOne({
+            productId: String(product.productId),
+            startdate: product.productQuoteDate || slot.quoteDate,
+            enddate: product.productEndDate || slot.endDate,
+          }).session(session);
+
+          if (!inventory) continue;
+
+          const qty = Number(product.quantity) || 0;
+          inventory.reservedQty = Math.max(0, Number(inventory.reservedQty || 0) - qty);
+          inventory.availableQty = Number(inventory.availableQty || 0) + qty;
+          await inventory.save({ session });
+          released += qty;
+        }
+      }
+
+      await Order.deleteOne({ _id: order._id }).session(session);
+
+      await session.commitTransaction();
+      session.endSession();
+
+      listCache.invalidate(
+        listCache.KEYS.orders,
+        listCache.KEYS.quotations,
+        listCache.KEYS.enquiries
+      );
+
+      return res.status(200).json({
+        success: "Order deleted",
+        orderId: order.orderId || order.quoteId || String(order._id),
+        unitsReleased: released,
+      });
+    } catch (error) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error("Error deleting order:", error);
+      return res
+        .status(500)
+        .json({ error: error.message || "Failed to delete the order" });
     }
   }
 

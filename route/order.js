@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 
 const listCache = require("../utils/listCache");
+/* Deleting a whole record asks for the admin password first. */
+const confirmPassword = require("../middleware/confirmPassword");
 
 /* Any non-GET on this router may have changed the collection, so the
    cached list is dropped. Hooking the router rather than each handler
@@ -12,6 +14,12 @@ router.use(listCache.invalidateOn(listCache.KEYS.orders));
    stale as the order list after a write here. Without this the quotation
    list kept saying Pending for up to two minutes after Generate Order. */
 router.use(listCache.invalidateOn(listCache.KEYS.quotations));
+/* And the enquiry behind that quotation moves from "quotation sent" to
+   "confirmed", or back to "cancelled". The enquiry list now carries that
+   stage, so it goes stale here too - without this the enquiry list and
+   calendar kept saying Quotation Sent for up to two minutes after an order
+   was raised. */
+router.use(listCache.invalidateOn(listCache.KEYS.enquiries));
 /* Reserving or releasing stock changes every product's StockAvailable. */
 router.use(listCache.invalidateOn(listCache.KEYS.products));
 const orderController = require("../controller/order");
@@ -31,6 +39,9 @@ router.put("/updateExistingOrderById/:id", orderController.updateExistingOrderBy
 router.put("/addNewProductToOrderById/:id", orderController.addNewProductToOrderById);
 router.put("/updateOrderFields", orderController.updateOrderFields);
 router.delete("/deleteProductInOrderById/:id", orderController.deleteProductInOrderById);
+/* Deleting the whole order, which asks for the admin password first. The
+   per-product delete above does not: it is an edit to an order that stays. */
+router.delete("/deleteOrder/:id", confirmPassword, orderController.deleteOrderById);
 router.put("/updateStatus/:id", orderController.updateStatus);
 router.put("/refurbishment/:id", orderController.refurbishment);
 router.put("/updateRemarks", orderController.updateRemarks);

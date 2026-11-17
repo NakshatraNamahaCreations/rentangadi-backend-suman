@@ -27,8 +27,40 @@ const ORDERS =
   "Address orderStatus slots.slotName slots.quoteDate slots.endDate " +
   "slots.quoteTime";
 
+/**
+ * enquiryDate is the delivery date and endDate the dismantle date - the
+ * enquiry form writes them from the "Delivery date" and "Dismantle date"
+ * pickers, and the detail screen labels them that way. The date the enquiry
+ * itself came in is createdAt. The list shows all three, so endDate is here:
+ * it is one short string, about 19KB across the eighteen hundred rows.
+ */
+/* GST is here because an enquiry's GrandTotal has the tax inside it as a
+   rupee amount on 573 of the 1,909, and the list has to take it back out to
+   work out what the lines come to before applying the rental days. */
 const ENQUIRIES =
-  "enquiryId clientName clientNo enquiryDate enquiryTime executivename " +
-  "executiveId GrandTotal status createdAt";
+  "enquiryId clientName clientNo enquiryDate endDate enquiryTime " +
+  "executivename executiveId GrandTotal GST status createdAt";
 
-module.exports = { QUOTATIONS, ORDERS, ENQUIRIES };
+/**
+ * Clients are the one list that cannot use an inclusion projection.
+ *
+ * They live in the user collection, and the screens read companyName and
+ * contactPersonNumber, which are in the documents but not in the schema -
+ * naming the fields to keep would therefore drop both silently. So this
+ * excludes instead: the password as before, and now the per-client
+ * permissions object, which no screen reads and every row carried.
+ *
+ * role stays. It is one short string, it is what the list is filtered by, and
+ * the executive panel is not accounted for well enough to be sure nothing
+ * reads it.
+ */
+const CLIENTS = "-password -permissions";
+
+/**
+ * And the executives hanging off each client: the list showed their names
+ * only, but every client carried the whole executive record - phone, email,
+ * permissions, timestamps - for each one attached to it.
+ */
+const CLIENT_EXECUTIVES = "name phoneNumber email isActive";
+
+module.exports = { QUOTATIONS, ORDERS, ENQUIRIES, CLIENTS, CLIENT_EXECUTIVES };

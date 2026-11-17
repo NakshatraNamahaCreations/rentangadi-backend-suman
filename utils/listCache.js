@@ -27,7 +27,11 @@ const KEYS = {
 
 const get = (key) => cache.get(key);
 const set = (key, value) => cache.set(key, value);
-const invalidate = (key) => cache.del(key);
+/* Variadic, like invalidateOn below: one write can touch more than one list
+   - adding a product to an order changes the order, the quotation and the
+   enquiry - and passing three keys to a one-key function dropped the first
+   and silently left the other two stale. */
+const invalidate = (...keys) => cache.del(keys.flat());
 
 /* OPTIONS and HEAD change nothing; OPTIONS in particular is the CORS
    preflight, which would otherwise drop the cache before every write. */
@@ -39,9 +43,9 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  * Hooking the router rather than each handler means new mutations are covered
  * without having to remember this file.
  */
-const invalidateOn = (key) => (req, res, next) => {
+const invalidateOn = (...keys) => (req, res, next) => {
   if (WRITE_METHODS.has(req.method)) {
-    res.on("finish", () => cache.del(key));
+    res.on("finish", () => keys.flat().forEach((k) => cache.del(k)));
   }
   next();
 };

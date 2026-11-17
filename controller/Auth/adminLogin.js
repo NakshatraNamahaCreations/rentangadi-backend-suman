@@ -3,6 +3,7 @@ const JWT_SECRET_KEY = require("../../config/jwtSecret");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose")
+const loginLimit = require("../../middleware/loginLimit");
 // async function adminSignUp(req, res) {
 //   try {
 //     const { email, password } = req.body;
@@ -249,7 +250,10 @@ async function adminLogin(req, res) {
     const { email, password } = req.body;
 
     const admin = await AdminModel.findOne({ email });
-    console.log(`admin: `, admin.toObject());
+    /* The log used to run before this check and call admin.toObject(), so an
+       unknown email threw a TypeError and came back as a 500 rather than
+       "invalid email or password" - and a known one printed the password
+       hash into the server log. */
     if (!admin) {
       return res.status(400).json({ error: "Invalid email or password" });
     }
@@ -259,9 +263,22 @@ async function adminLogin(req, res) {
       return res.status(400).json({ error: "Invalid email or password" });
     }
 
-    const tokenPayload = { email, permissions: admin.permissions };
+    /* id and role are new. The token used to carry the email and the
+       permissions object only, which meant the API had no way to tell an
+       admin from a client beyond guessing from the shape of the payload, and
+       no way at all to narrow a query to the person asking. */
+    const tokenPayload = {
+      id: admin._id,
+      email,
+      role: admin.role || "admin",
+      permissions: admin.permissions,
+    };
 
     const token = jwt.sign(tokenPayload, JWT_SECRET_KEY, { expiresIn: "24h" });
+
+    /* A correct password clears this address's failed-attempt count, so the
+       cap only ever bites on guessing. */
+    loginLimit.clear(req);
 
     // token stuff
     const now = new Date();

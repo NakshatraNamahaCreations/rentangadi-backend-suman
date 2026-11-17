@@ -90,5 +90,10 @@ const EnquirySchema = new mongoose.Schema(
   }
 );
 
+/* See the note in model/order.js. enquiryDate is what the enquiry calendar
+   filters a month by; enquiryId already carries a unique index. */
+EnquirySchema.index({ enquiryDate: 1 });
+EnquirySchema.index({ createdAt: -1 });
+
 const Enquirymodel = mongoose.model("Enquiry", EnquirySchema);
 module.exports = Enquirymodel;

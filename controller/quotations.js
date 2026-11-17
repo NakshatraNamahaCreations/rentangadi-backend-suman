@@ -2,10 +2,17 @@ const mongoose = require("mongoose");
 const Quotationmodel = require("../model/quotations");
 const listCache = require("../utils/listCache");
 const listFields = require("../utils/listFields");
+const monthFilter = require("../utils/monthFilter");
+const { withOrderState } = require("../utils/quotationStage");
+const { readPaging, tellPaging } = require("../utils/listPage");
 const NodeCache = require("node-cache");
 const ProductModel = require("../model/product");
 const InventoryModel = require("../model/inventory");
 const Counter = require("../model/getNextSequence");
+const {
+  addMissingToEnquiry,
+  removeFromEnquiry,
+} = require("../utils/propagateProduct");
 const cache = new NodeCache({ stdTTL: 100, checkperiod: 120 });
 const moment = require("moment");
 const { parseDate } = require("../utils/dateString");
@@ -619,10 +626,72 @@ class Quotations {
 
       await quotation.save({ session });
 
+      /* The enquiry behind this quotation is brought in line with it, both
+         ways: a product added here appears on the enquiry, and one removed
+         here comes off it. The three screens are meant to describe one job,
+         so a line that exists on two of them and not the third is the thing
+         being fixed.
+
+         The removal only runs when the quotation still has products on it.
+         This handler replaces the slots wholesale, so an empty list is far
+         more likely to be a partial or malformed payload than a deliberate
+         emptying, and stripping the enquiry on the strength of one would
+         lose what was asked for. */
+      const onQuotation = (quotation.slots || []).flatMap((s) =>
+        (s.Products || s.products || []).map((p) => ({
+          productId: p.productId,
+          productName: p.productName || p.name,
+          qty: Number(p.qty ?? p.quantity) || 0,
+          price: Number(p.price) || 0,
+          productImage: p.productImage || p.ProductIcon || "",
+        }))
+      );
+
+      const onEnquiry = await addMissingToEnquiry({
+        session,
+        enquiryId: quotation.enquiryId,
+        products: onQuotation,
+      });
+
+      let removedFromEnquiry = 0;
+
+      if (onQuotation.length > 0 && quotation.enquiryId) {
+        const keep = new Set(onQuotation.map((p) => String(p.productId)));
+
+        const enquiry = await Enquirymodel.findOne({
+          enquiryId: Number(quotation.enquiryId),
+        })
+          .select("products")
+          .lean()
+          .session(session);
+
+        const stale = (enquiry?.products || [])
+          .map((p) => String(p.productId))
+          .filter((id) => id && !keep.has(id));
+
+        for (const productId of [...new Set(stale)]) {
+          const off = await removeFromEnquiry({
+            session,
+            enquiryId: quotation.enquiryId,
+            productId,
+          });
+          if (off.status === "removed") removedFromEnquiry += 1;
+        }
+      }
+
+      onEnquiry.removed = removedFromEnquiry;
+
       await session.commitTransaction();
       session.endSession();
 
-      return res.json({ success: "Quotation updated successfully", data: quotation });
+      /* The enquiry lists are built from these documents and are stale now. */
+      listCache.invalidate(listCache.KEYS.quotations, listCache.KEYS.enquiries);
+
+      return res.json({
+        success: "Quotation updated successfully",
+        data: quotation,
+        enquiry: onEnquiry,
+      });
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
@@ -782,23 +851,50 @@ class Quotations {
      ?limit / ?page paginate. */
   async allquotations(req, res) {
     try {
-      const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
-      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      /* limit is capped - see utils/listPage.js. */
+      const { limit, page } = readPaging(req);
       const full = String(req.query.full || "") === "1";
       const LIST_FIELDS = listFields.QUOTATIONS;
 
-      /* Only the plain call is cached; paginated ones are already fast. */
-      const isDefaultCall = !limit && !full;
-      if (isDefaultCall) {
-        const hit = listCache.get(listCache.KEYS.quotations);
-        if (hit) return res.status(200).json({ quoteData: hit });
+      /* One calendar month, when the calendar asks for one. quoteDate is the
+         day a quotation sits on, the same day the calendar draws it. */
+      const month = monthFilter("quoteDate", req.query.month);
+
+      const isDefaultCall = !limit && !full && !month;
+      const hit = !limit && !full ? listCache.get(listCache.KEYS.quotations) : null;
+
+      if (isDefaultCall && hit) {
+        tellPaging(res, { total: hit.length, page: 1, limit: 0 });
+        return res.status(200).json({ quoteData: hit });
       }
 
-      const query = Quotationmodel.find({}).sort({ _id: -1 });
+      /* A month is narrowed from the cached list rather than queried again -
+         see the note in controller/enquiry.js. */
+      if (month && hit) {
+        const matches = monthFilter.monthMatcher("quoteDate", req.query.month);
+        const rows = hit.filter(matches);
+        tellPaging(res, { total: rows.length, page: 1, limit: 0 });
+        return res.status(200).json({ quoteData: rows });
+      }
+
+      const query = Quotationmodel.find(month || {}).sort({ _id: -1 });
       if (!full) query.select(LIST_FIELDS);
       if (limit > 0) query.skip((page - 1) * limit).limit(limit);
-      const quoteData = await query.lean();
+      const rows = await query.lean();
+
+      /* Each row carries what became of the order raised from it, so the
+         quotation screens no longer download all 1,250 orders to find out
+         whether a quote marked "send" was later called off. */
+      const quoteData = await withOrderState(rows);
+
       if (isDefaultCall) listCache.set(listCache.KEYS.quotations, quoteData);
+
+      /* With a limit the page cannot say how many there are, so it is
+         counted - an indexed count, not a second read of the rows. */
+      const total = limit > 0
+        ? await Quotationmodel.countDocuments(month || {})
+        : quoteData.length;
+      tellPaging(res, { total, page, limit });
 
       // // Loop through each quotation to enrich slots with inventory data
       // const enrichedQuotations = await Promise.all(quoteData.map(async (quote) => {

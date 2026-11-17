@@ -1,5 +1,6 @@
 const Clientmodel = require("../model/clients");
 const listCache = require("../utils/listCache");
+const listFields = require("../utils/listFields");
 const NodeCache = require("node-cache");
 const cache = new NodeCache({ stdTTL: 100, checkperiod: 120 });
 const { parse } = require('date-fns');
@@ -284,12 +285,12 @@ class Clients {
       const hit = listCache.get(listCache.KEYS.clients);
       if (hit) return res.json({ Client: hit });
 
+      /* Same projection the background refresh uses, from the same place -
+         written out separately they drift, and this list is one of the two
+         that drifted before. */
       const clients = await User.find({ role: "client" })
-        .populate({
-          path: 'executives',
-          select: '-password', // Exclude password from executives
-        })
-        .select('-password') // Exclude password from the client itself
+        .populate({ path: 'executives', select: listFields.CLIENT_EXECUTIVES })
+        .select(listFields.CLIENTS)
         .sort({ createdAt: -1 })
         .lean();
       if (clients && clients.length > 0) {

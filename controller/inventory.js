@@ -3,6 +3,7 @@ const ProductManagementModel = require("../model/product");
 const { parseDate } = require("../utils/dateString");
 const moment = require("moment");
 const Quotationmodel = require("../model/quotations")
+const Ordermodel = require("../model/order")
 class Inventory {
   async updateInventory(req, res) {
     const { startDate, endDate, products } = req.body;
@@ -334,6 +335,66 @@ class Inventory {
       }
 
       // -----------------------------
+      // Who is blocking the stock
+      // -----------------------------
+      /**
+       * The blocked figure comes from the inventory rows above, which carry a
+       * quantity and a date range and nothing else - no order id - so they
+       * cannot say who the reservation is for. The confirmed orders can: an
+       * inventory row exists because an order was confirmed, so the orders
+       * whose slots overlap this window are the same reservations seen from
+       * the other side. For the one checked by hand - White Cane Sofa over
+       * 16-11 to 05-12 - the two inventory rows and the two confirmed orders
+       * match exactly, quantity for quantity.
+       *
+       * Built the same way as the pending quotations above, one entry per
+       * slot, so the two lists behave alike on screen.
+       */
+      const confirmedOrders = await Ordermodel.find({
+        orderStatus: "Confirm",
+        "slots.products.productId": { $in: productIds },
+      })
+        .select(
+          "orderId quoteId clientName clientNo executivename orderStatus slots createdAt"
+        )
+        .lean();
+
+      const blockedOrderDetails = {};
+
+      for (const o of confirmedOrders || []) {
+        for (const slot of o.slots || []) {
+          const slotStart = parseDate(slot.quoteDate);
+          const slotEnd = parseDate(slot.endDate);
+
+          if (!slotStart || !slotEnd) continue;
+          if (!(slotStart <= end && slotEnd >= start)) continue;
+
+          for (const p of slot.products || []) {
+            const pid = String(p.productId);
+            if (!productIds.includes(pid)) continue;
+
+            const qty = Number(p.quantity ?? p.qty ?? 0);
+
+            (blockedOrderDetails[pid] = blockedOrderDetails[pid] || []).push({
+              orderDocId: String(o._id),
+              /* A fair number of orders carry no orderId of their own; the
+                 quotation they came from is what the screens show then. */
+              orderId: o.orderId || "",
+              quoteId: o.quoteId || "",
+              clientName: o.clientName || "",
+              clientNo: o.clientNo || "",
+              executivename: o.executivename || "",
+              status: o.orderStatus || "",
+              slotName: slot.slotName || "",
+              quoteDate: slot.quoteDate || "",
+              endDate: slot.endDate || "",
+              qty,
+            });
+          }
+        }
+      }
+
+      // -----------------------------
       // ✅ 3) Your existing product stock calculation
       // -----------------------------
       /* Only these four fields reach the response; the rest, images above
@@ -341,7 +402,14 @@ class Inventory {
       const productsData = await ProductManagementModel.find({
         _id: { $in: productIds },
       })
-        .select("ProductName ProductStock ProductPrice StockAvailable")
+        .select(
+          "ProductName ProductStock ProductPrice StockAvailable " +
+          /* The availability screen groups by subcategory, so it has to come
+             back with the row; category alongside it is one short string and
+             saves a second lookup when the screen wants to say where the
+             product sits. */
+          "ProductSubcategory ProductCategory"
+        )
         .lean();
 
       const stock = productsData.map((product) => {
@@ -389,11 +457,19 @@ class Inventory {
         return {
           productId: product._id,
           productName: product.ProductName,
+          productSubcategory: product.ProductSubcategory || "",
+          productCategory: product.ProductCategory || "",
           totalStock: product.ProductStock,
           reservedStock: maxReserved,
           availableStock,
           pendingQuotationQty,
           pendingQuotations: pendingQuoteDetails[String(product._id)] || [],
+          /* The orders behind reservedStock. Their quantities can add up to
+             more than reservedStock, which is the worst single day rather
+             than the total across the window - two bookings a fortnight
+             apart never hold the stock at the same time. The screen says so
+             rather than quietly reconciling them. */
+          blockedOrders: blockedOrderDetails[String(product._id)] || [],
           price: product.ProductPrice || 0,
           StockAvailable: product.StockAvailable,
         };

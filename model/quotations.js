@@ -124,5 +124,11 @@ const QuotationSchema = new mongoose.Schema({
   },
 }, { timestamps: true });
 
+/* See the note in model/order.js. quoteDate is what the quotation calendar
+   filters a month by; quoteId and enquiryId already carry unique indexes
+   from their field declarations. */
+QuotationSchema.index({ quoteDate: 1 });
+QuotationSchema.index({ createdAt: -1 });
+
 const Quotationmodel = mongoose.model("Quotation", QuotationSchema);
 module.exports = Quotationmodel;

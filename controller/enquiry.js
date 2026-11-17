@@ -2,12 +2,15 @@ const mongoose = require("mongoose");
 const Enquirymodel = require("../model/enquiry");
 const listCache = require("../utils/listCache");
 const listFields = require("../utils/listFields");
+const monthFilter = require("../utils/monthFilter");
+const { readPaging, tellPaging } = require("../utils/listPage");
 const Counter = require("../model/getNextSequence");
 const Inventory = require("../model/inventory");
 const Clientmodel = require("../model/clients");
 const Quotationmodel = require("../model/quotations");
 const ProductManagementModel = require("../model/product");
 const { compareDates } = require("../utils/dateString");
+const { grownTotal } = require("../utils/propagateProduct");
 const OrderModel = require("../model/order"); // ✅ update if your model file name is orders/orderModel
 const moment = require("moment");
 const Order = require("../model/order"); // ✅ adjust path to your Order model
@@ -25,56 +28,15 @@ const Order = require("../model/order"); // ✅ adjust path to your Order model
  * "confirmed" | "cancelled". An enquiry with no quotation is absent from the
  * map, which the caller reads as "pending".
  */
-async function pipelineStageByEnquiry(enquiryIds) {
-  const stages = new Map();
-  if (!enquiryIds.length) return stages;
-
-  const quotations = await Quotationmodel.find({
-    enquiryId: { $in: enquiryIds },
-  })
-    .select("quoteId enquiryId status")
-    .lean();
-
-  if (!quotations.length) return stages;
-
-  const orders = await Order.find({
-    quoteId: { $in: quotations.map((q) => q.quoteId).filter(Boolean) },
-  })
-    .select("quoteId orderStatus")
-    .lean();
-
-  /* A quote re-confirmed after being called off reads as confirmed, so a
-     confirmed order is never overwritten by a cancelled one. */
-  const orderByQuote = new Map();
-  orders.forEach((o) => {
-    const key = String(o.quoteId || "");
-    if (!key || orderByQuote.get(key) === "confirm") return;
-    orderByQuote.set(key, String(o.orderStatus || "").toLowerCase());
-  });
-
-  quotations.forEach((q) => {
-    const key = String(q.enquiryId ?? "");
-    if (!key) return;
-
-    const orderState = orderByQuote.get(String(q.quoteId || ""));
-    let stage = "sent";
-    if (orderState === "confirm") stage = "confirmed";
-    else if (orderState === "cancelled") stage = "cancelled";
-    else if (String(q.status || "").toLowerCase() === "cancelled") {
-      /* The quotation itself was withdrawn, before any order came of it. */
-      stage = "cancelled";
-    }
-
-    /* One enquiry can carry several quotations; the furthest one wins. */
-    const RANK = { sent: 1, cancelled: 2, confirmed: 3 };
-    const held = stages.get(key);
-    if (!held || RANK[stage] > RANK[held]) stages.set(key, stage);
-  });
-
-  return stages;
-}
-
-
+/* The stage rule moved to utils/enquiryStage.js, because the background
+   refresh that keeps the list warm has to apply the same one - two copies of
+   "is this enquiry confirmed" is exactly the pair that drifts. */
+const {
+  stageByEnquiry: pipelineStageByEnquiry,
+  /* Named apart from the local `withStage` further down, which is a list of
+     rows rather than the function that builds one. */
+  withStage: attachStage,
+} = require("../utils/enquiryStage");
 
 class Enquiry {
 
@@ -285,29 +247,60 @@ class Enquiry {
      the response is the same bare array it always was. */
   async allEnquiry(req, res) {
     try {
-      const limit = Math.max(0, parseInt(req.query.limit, 10) || 0);
-      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      /* limit is capped - see utils/listPage.js - so ?limit=100000 can no
+         longer ask the database for everything it has. */
+      const { limit, page } = readPaging(req);
       const full = String(req.query.full || "") === "1";
       const LIST_FIELDS = listFields.ENQUIRIES;
 
-      /* Only the plain call is cached; paginated ones are already fast. */
-      const isDefaultCall = !limit && !full;
-      if (isDefaultCall) {
-        const hit = listCache.get(listCache.KEYS.enquiries);
-        if (hit) return res.status(200).json(hit);
+      /* The calendar has always sent ?month=2026-11 and this has always
+         ignored it, so every month drew the same 1,800 enquiries and the
+         cards headed "November 2026" counted all time. */
+      const month = monthFilter("enquiryDate", req.query.month);
+
+      const isDefaultCall = !limit && !full && !month;
+      const hit = !limit && !full ? listCache.get(listCache.KEYS.enquiries) : null;
+
+      if (isDefaultCall && hit) {
+        tellPaging(res, { total: hit.length, page: 1, limit: 0 });
+        return res.status(200).json(hit);
       }
 
-      const q = Enquirymodel.find({})
+      /* A month is answered from that same cached list rather than by asking
+         Mongo again: the query cannot use an index and takes about 1.3s,
+         where narrowing the copy already in memory takes about a
+         millisecond - and is exactly as fresh as the list screens, which
+         read the same copy. */
+      if (month && hit) {
+        const matches = monthFilter.monthMatcher("enquiryDate", req.query.month);
+        const rows = hit.filter(matches);
+        tellPaging(res, { total: rows.length, page: 1, limit: 0 });
+        return res.status(200).json(rows);
+      }
+
+      const q = Enquirymodel.find(month || {})
         .populate("executiveId", "name")
         .sort({ _id: -1 });
       if (!full) q.select(LIST_FIELDS);
       if (limit > 0) q.skip((page - 1) * limit).limit(limit);
-      const enquiryData = await q.lean();
+      const rows = await q.lean();
+
+      /* Each row carries how far it got, so the screens do not have to work
+         it out by downloading every quotation and every order first - which
+         is why the status filters used to read zero for several seconds
+         after the page opened. */
+      const enquiryData = await attachStage(rows);
+
       if (isDefaultCall) listCache.set(listCache.KEYS.enquiries, enquiryData);
 
-      if (enquiryData) {
-        return res.status(200).json(enquiryData);
-      }
+      /* With a limit the page cannot say how many there are, so it is
+         counted - an indexed count, not a second read of the rows. */
+      const total = limit > 0
+        ? await Enquirymodel.countDocuments(month || {})
+        : enquiryData.length;
+      tellPaging(res, { total, page, limit });
+
+      return res.status(200).json(enquiryData);
     } catch (error) {
       console.error("Something went wrong", error);
       return res.status(500).json({ error: "Internal server error" });
@@ -797,10 +790,46 @@ class Enquiry {
         return res.status(404).json({ error: "Product not found in enquiry" });
       }
 
-      const newGrandTotal = updatedProducts.reduce(
-        (sum, product) => sum + product.total,
+      /**
+       * The total shrinks by what the removed line was worth; it is not
+       * re-added from scratch.
+       *
+       * Setting GrandTotal to the sum of the remaining lines, which is what
+       * this did, throws the GST away. On an enquiry GST is held as a rupee
+       * amount that sits inside GrandTotal - 4,000 of lines plus 720 of GST
+       * is stored as 4,720 - and 572 of the 1,906 enquiries carry one. For
+       * every one of those, deleting any product also quietly deleted the
+       * tax off the whole enquiry.
+       *
+       * So the line is taken off at the rate this enquiry already charges,
+       * and the GST figure is reduced by that line's share of it.
+       */
+      const num = (v) => Number(v) || 0;
+
+      const removed = enquiry.products
+        .filter((product) => product.productId === productId)
+        .reduce((sum, product) => sum + num(product.total), 0);
+
+      const linesBefore = enquiry.products.reduce(
+        (sum, product) => sum + num(product.total),
         0
       );
+
+      const gstRate = linesBefore > 0 ? num(enquiry.GST) / linesBefore : 0;
+      const newGST = gstRate > 0 ? Math.round(num(enquiry.GST) - removed * gstRate) : num(enquiry.GST);
+
+      /* grownTotal with a negative line is the same arithmetic in reverse:
+         the GST already in the total is the part that must not scale. */
+      let newGrandTotal = grownTotal(enquiry.GrandTotal, linesBefore, -removed, {
+        fixed: num(enquiry.GST),
+        discountPercent: num(enquiry.discount),
+        gstPercent: 0,
+      });
+      newGrandTotal = Math.round(newGrandTotal - removed * gstRate);
+
+      /* Never below what is left on the enquiry plus its tax. */
+      const floor = updatedProducts.reduce((sum, p) => sum + num(p.total), 0);
+      if (newGrandTotal < floor) newGrandTotal = Math.round(floor + newGST);
 
       // Update the enquiry document
       const updatedEnquiry = await Enquirymodel.findOneAndUpdate(
@@ -808,7 +837,8 @@ class Enquiry {
         {
           $set: {
             products: updatedProducts,
-            GrandTotal: newGrandTotal
+            GrandTotal: newGrandTotal,
+            GST: newGST,
           }
         },
         { new: true } // Return the updated document

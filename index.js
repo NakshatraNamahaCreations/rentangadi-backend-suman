@@ -69,11 +69,60 @@ if (!process.env.MONGO_URI) {
   );
 }
 
+/**
+ * Which sites a browser may call this API from.
+ *
+ * This is not a security control and should not be mistaken for one - curl
+ * and every other non-browser client ignore it completely, which is exactly
+ * how the open endpoints were found. What it does do is stop a page on some
+ * other domain from making a logged-in staff browser fetch on its behalf.
+ * The token guard below is what actually protects the data.
+ *
+ * CORS_ORIGINS overrides the list, comma separated, so a new subdomain needs
+ * an environment change rather than a deploy.
+ */
+const ALLOWED_ORIGINS = (
+  process.env.CORS_ORIGINS ||
+  [
+    "https://newadmin.rentangadi.in",
+    "https://admin.rentangadi.in",
+    "https://website.rentangadi.in",
+    "https://client.rentangadi.in",
+    "https://rentangadi.in",
+    "https://www.rentangadi.in",
+    /* The dev servers for the admin panel, the website and the exec panel. */
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+  ].join(",")
+)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 //middleware
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
-app.use(cors({ maxAge: 86400 }));
+app.use(
+  cors({
+    /* An unknown origin is answered without the CORS headers rather than
+       with an error: throwing here turns a cross-origin page's fetch into a
+       500 in our logs, and the browser blocks it either way. Requests with no
+       Origin at all - curl, uptime checks, the payment gateways - are let
+       through, because CORS has nothing to say about them. */
+    origin: (origin, callback) => {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      return callback(null, false);
+    },
+    credentials: true,
+    /* A browser hides every response header a cross-origin page did not ask
+       for, so the paging counts would be invisible to the very callers they
+       are for. */
+    exposedHeaders: ["X-Total-Count", "X-Page", "X-Limit"],
+    maxAge: 86400,
+  })
+);
 app.use(morgan("dev"));
 app.use(express.static("public"));
 app.use(express.urlencoded({ extended: true }));
@@ -142,6 +191,43 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+/**
+ * Logging in is rate limited; everything that is not explicitly public needs
+ * a token. Both sit here, above the route mounts, so a route added below is
+ * covered without anyone having to remember to cover it.
+ */
+const loginLimit = require("./middleware/loginLimit");
+const { gate } = require("./middleware/requireAuth");
+
+const LOGIN_PATHS =
+  /^\/(adminLogin|user\/(login|signup|executiveLogin)|client\/clientlogin)$/i;
+
+app.use("/api", (req, res, next) => {
+  const path = req.path.replace(/\/+$/, "") || "/";
+  if (req.method !== "POST" || !LOGIN_PATHS.test(path)) return next();
+  return loginLimit(req, res, next);
+});
+
+app.use("/api", gate);
+
+/**
+ * The two summary endpoints hold their own short-lived answers. A write
+ * anywhere under /api may have changed what they say - a new order moves a
+ * count, a client's totals and the dashboard all at once - so both are
+ * dropped on any write rather than each route having to know about them.
+ */
+const dashboardCache = require("./controller/dashboard");
+const clientActivityCache = require("./controller/clientActivity");
+
+app.use("/api", (req, res, next) => {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
+  res.on("finish", () => {
+    dashboardCache.invalidate();
+    clientActivityCache.invalidate();
+  });
+  next();
+});
+
 app.use("/api", payu);
 app.use("/api", adminLogin);
 app.use("/api/user", user);
@@ -161,6 +247,7 @@ app.use("/api/payment", CCAvenue);
 app.use("/api/Enquiry", enquiry);
 app.use("/api/payment", payment);
 app.use("/api/report", report);
+app.use("/api/dashboard", require("./route/dashboard"));
 
 /* The three big lists are read once on boot and refreshed in the
    background, so opening a screen serves them from memory instead of
@@ -176,31 +263,44 @@ const Quotationmodel = require("./model/quotations");
    after boot every list quietly lost them again. */
 const listFields = require("./utils/listFields");
 
-listCache.register(listCache.KEYS.enquiries, () =>
-  Enquirymodel.find({})
-    .populate("executiveId", "name")
-    .sort({ _id: -1 })
-    .select(listFields.ENQUIRIES)
-    .lean()
+/* The stage - pending, quotation sent, confirmed, cancelled - is worked out
+   here and cached with the rows, so the enquiry screens get it with the list
+   instead of downloading every quotation and every order to derive it. */
+const { withStage } = require("./utils/enquiryStage");
+
+listCache.register(listCache.KEYS.enquiries, async () =>
+  withStage(
+    await Enquirymodel.find({})
+      .populate("executiveId", "name")
+      .sort({ _id: -1 })
+      .select(listFields.ENQUIRIES)
+      .lean()
+  )
 );
 
 listCache.register(listCache.KEYS.orders, () =>
   ordermodel.find({}).sort({ _id: -1 }).select(listFields.ORDERS).lean()
 );
 
-listCache.register(listCache.KEYS.quotations, () =>
-  Quotationmodel.find({})
-    .sort({ _id: -1 })
-    .select(listFields.QUOTATIONS)
-    .lean()
+/* Each quotation carries what became of the order raised from it, so the
+   quotation screens do not download every order to find out. */
+const { withOrderState } = require("./utils/quotationStage");
+
+listCache.register(listCache.KEYS.quotations, async () =>
+  withOrderState(
+    await Quotationmodel.find({})
+      .sort({ _id: -1 })
+      .select(listFields.QUOTATIONS)
+      .lean()
+  )
 );
 
 const UserModel = require("./model/user"); // clients live in the user collection, role: "client"
 
 listCache.register(listCache.KEYS.clients, () =>
   UserModel.find({ role: "client" })
-    .populate({ path: "executives", select: "-password" })
-    .select("-password")
+    .populate({ path: "executives", select: listFields.CLIENT_EXECUTIVES })
+    .select(listFields.CLIENTS)
     .sort({ createdAt: -1 })
     .lean()
 );

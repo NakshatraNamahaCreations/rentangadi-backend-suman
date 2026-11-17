@@ -256,5 +256,20 @@ orderSchema.pre("save", function (next) {
 // });
 
 
+/**
+ * Indexes.
+ *
+ * There were none at all beyond _id, so every list, every count and every
+ * lookup by quotation read the whole collection. At twelve hundred documents
+ * that is survivable and still showed up as four-and-a-half-second spikes on
+ * the list endpoints; it gets worse every month.
+ *
+ * quoteId already carries a unique index from its field declaration, which
+ * serves that lookup. createdAt is how every list is sorted and how the
+ * dashboard buckets by month.
+ */
+orderSchema.index({ createdAt: -1 });
+orderSchema.index({ orderStatus: 1, createdAt: -1 });
+
 const Order = mongoose.model("Order", orderSchema);
 module.exports = Order;

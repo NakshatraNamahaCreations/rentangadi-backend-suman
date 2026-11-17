@@ -12,6 +12,13 @@ const { superAdminMiddleware } = require("../middleware/superAdminMiddleware");
 
 
 router.post("/addClients", ClientController.createClients);
+/* Per-client counts, business and last interaction - what the clients
+   screen used to work out by downloading every enquiry and every order. */
+const { clientActivity, clientHistory } = require("../controller/clientActivity");
+router.get("/activity", clientActivity);
+/* One client's records, fetched when the preview panel opens. */
+router.get("/:id/history", clientHistory);
+
 router.get("/getallClients", ClientController.getallClients);
 router.get("/TotalNumberOfClients", ClientController.getTotalNumberOfClients);
 router.get("/getallClientsNames", ClientController.getClientsNames);

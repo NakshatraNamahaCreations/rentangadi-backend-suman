@@ -53,10 +53,19 @@ exports.getAllRefurbishments = async (req, res) => {
 exports.getRefurbishmentById = async (req, res) => {
   const id = req.params.id;
   try {
-    const refurbishment = await RefurbishmentData.findOne({ orderId: id });
-    if (!refurbishment) return res.status(404).json({ message: "Refurbishment not found" });
+    const refurbishment = await RefurbishmentData.findOne({ orderId: id }).lean();
 
-    res.status(200).json(refurbishment);
+    /* Most orders have never been refurbished, and that is not an error.
+       This used to answer 404 with { message }, which every caller then read
+       as if it were a refurbishment - so the order page logged a failure on
+       each load and the invoice page drew itself from the error body. An
+       empty record says the same thing in the shape callers expect, and
+       `found` lets one tell empty from missing without reading the status. */
+    if (!refurbishment) {
+      return res.status(200).json({ found: false, orderId: id, products: [] });
+    }
+
+    res.status(200).json({ ...refurbishment, found: true });
   } catch (error) {
     res.status(500).json({ message: "Error fetching refurbishment", error });
   }

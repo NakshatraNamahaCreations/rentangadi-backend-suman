@@ -1,3 +1,4 @@
+const JWT_SECRET_KEY = require("../config/jwtSecret");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const Clientmodel = require("../model/clients");
@@ -263,7 +264,10 @@ const executiveController = {
           phoneNumber: executive.phoneNumber,
           role: executive.role
         },
-        process.env.JWT_SECRET,
+        /* Was process.env.JWT_SECRET, which this deployment never set: jwt.sign
+           then threw and executive login failed outright. Signs with the same
+           key the rest of the API verifies against. */
+        JWT_SECRET_KEY,
         { expiresIn: '24h' }
       );
 

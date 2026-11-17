@@ -59,6 +59,10 @@ const UserSchema = new mongoose.Schema({
 // 	return await bcrypt.compare(enteredPassword, this.password);
 // };
 
+/* Clients and executives share this collection, so every client list is a
+   filter on role - and that filter had no index behind it. */
+UserSchema.index({ role: 1, createdAt: -1 });
+
 const User = mongoose.model('User', UserSchema);
 
 module.exports = User;

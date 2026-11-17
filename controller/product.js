@@ -66,10 +66,21 @@ const buildProductList = async () => {
   };
 
   const [products, reservations] = await Promise.all([
-    /* images is the heaviest field on a product and nothing on the list reads
-       it, nor Dates; leaving them out halves the read. */
+    /**
+     * images has to stay.
+     *
+     * It was dropped here as the heaviest field on a product, on the reading
+     * that no list draws it - but the public site builds its whole catalogue
+     * from this one response and opens the product page straight out of it,
+     * so dropping it left every product on the site with exactly one picture,
+     * the main icon, and 480 photographs across 203 products unreachable.
+     *
+     * What is not needed is the Cloudinary public_id and the subdocument _id
+     * on each entry, which together are most of the weight: the site reads
+     * url and color and nothing else. Dates is still out - nothing reads it.
+     */
     ProductManagementModel.find({})
-      .select("-images -Dates")
+      .select("-Dates -images.public_id -images._id")
       .sort({ createdAt: -1 })
       .lean(),
     InventoryModel.aggregate([
@@ -1066,14 +1077,37 @@ class ProductManagement {
 
   async quoteProduct(req, res) {
     try {
-      let Product = await ProductManagementModel.find({});
-      // .select(
-      //   "ProductName ProductPrice offerPrice ProductSKU"
-      // );
+      /**
+       * ids narrows the answer to the products a screen actually needs.
+       *
+       * Without it this returns the whole catalogue - 267 products, 320KB,
+       * three and a half seconds - and the order detail page asked for all of
+       * it on every load to show the five products on one order. The screens
+       * that genuinely need the catalogue, like the "add product" picker,
+       * simply call it with no ids and get what they always got.
+       *
+       * Anything that is not a valid object id is dropped rather than passed
+       * to Mongo, which would throw a cast error and turn the whole request
+       * into a 500.
+       */
+      const ids = String(req.query.ids || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => mongoose.Types.ObjectId.isValid(s));
 
-      if (Product) {
-        return res.status(200).json({ QuoteProduct: Product });
+      /* An ids list that survived nothing is not the same as no list at all:
+         answering with the whole catalogue there would quietly undo the
+         saving. It is an empty answer. */
+      if (req.query.ids && ids.length === 0) {
+        return res.status(200).json({ QuoteProduct: [] });
       }
+
+      const filter = ids.length ? { _id: { $in: ids } } : {};
+      const Product = await ProductManagementModel.find(filter).lean();
+
+      /* find() resolves to an array, never null, so the old `if (Product)`
+         left no path that answered at all when it was empty. */
+      return res.status(200).json({ QuoteProduct: Product });
     } catch (error) {
       return res
         .status(500)
