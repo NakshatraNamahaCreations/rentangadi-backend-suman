@@ -95,6 +95,7 @@ const ALLOWED_ORIGINS = (
     "http://localhost:5173",
     "http://localhost:5174",
     'https://rentangadiadmin.netlify.app',
+    "https://rentangadiwebsite.netlify.app",
   ].join(",")
 )
   .split(",")
